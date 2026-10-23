@@ -135,6 +135,44 @@ def _smooth_ctrl_vjp(
 
 
 @wp.kernel(enable_backward=False)
+def _actuator_lam(
+  # Model:
+  jnt_actfrclimited: wp.array[bool],
+  jnt_actfrcrange: wp.array2d[wp.vec2],
+  dof_jntid: wp.array[int],
+  # Data in:
+  qfrc_actuator_in: wp.array2d[float],
+  # In:
+  lam: wp.array2d[float],
+  # Out:
+  lam_out: wp.array2d[float],
+):
+  """Zeroes the multiplier on dofs whose joint actuator force is clamped by actuatorfrcrange."""
+  worldid, dofid = wp.tid()
+  value = lam[worldid, dofid]
+  jntid = dof_jntid[dofid]
+  if jnt_actfrclimited[jntid]:
+    frcrange = jnt_actfrcrange[worldid % jnt_actfrcrange.shape[0], jntid]
+    qfrc = qfrc_actuator_in[worldid, dofid]
+    if qfrc <= frcrange[0] or qfrc >= frcrange[1]:
+      value = 0.0
+  lam_out[worldid, dofid] = value
+
+
+def actuator_lam(m: Model, d_out: Data, lam: wp.array, bc: BackwardContext) -> wp.array:
+  """Returns lam with the dofs whose joint actuator force is clamped zeroed."""
+  if not m.nu:
+    return lam
+  wp.launch(
+    _actuator_lam,
+    dim=(d_out.nworld, m.nv),
+    inputs=[m.jnt_actfrclimited, m.jnt_actfrcrange, m.dof_jntid, d_out.qfrc_actuator, lam],
+    outputs=[bc.actuator_lam],
+  )
+  return bc.actuator_lam
+
+
+@wp.kernel(enable_backward=False)
 def _xfrc_applied_vjp(
   # Model:
   nv: int,
@@ -333,7 +371,7 @@ def smooth_qvel_backward(m: Model, d: Data, d_out: Data, lam: wp.array, adj_qvel
         d_out.moment_rowadr,
         d_out.moment_colind,
         d_out.actuator_moment,
-        lam,
+        actuator_lam(m, d_out, lam, bc),
       ],
       outputs=[d.ctrl.grad],
     )
@@ -367,7 +405,8 @@ def smooth_qpos_backward(m: Model, d: Data, d_out: Data, lam: wp.array, res_qpos
     smooth_adjoint.actuator_qpos_vjp,
     smooth_adjoint.gravcomp_qpos_vjp,
   ):
-    residual = vjp(m, linearization, lam, bc=bc)
+    vjp_lam = actuator_lam(m, d_out, lam, bc) if vjp is smooth_adjoint.actuator_qpos_vjp else lam
+    residual = vjp(m, linearization, vjp_lam, bc=bc)
     wp.launch(adjoint_util._accum_cols, dim=residual.shape, inputs=[residual], outputs=[res_qpos])
 
 
