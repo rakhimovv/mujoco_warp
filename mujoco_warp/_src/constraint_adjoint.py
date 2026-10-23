@@ -292,6 +292,20 @@ def _proj_edge_spatial(Vsp: wp.spatial_vector, fm: wp.mat33, fric: vec5, e: int,
   return c
 
 
+@wp.func
+def _contact_any_active(efc_state_in: wp.array2d[int], contact_efc_address_in: wp.array2d[int], cid: int, w: int) -> bool:
+  """Returns True if any constraint row of the contact is not SATISFIED.
+
+  A pyramidal contact has one row, with its own state, per pyramid edge, so the first row can be
+  SATISFIED while other edges carry force. An elliptic contact shares one state across its rows.
+  """
+  for j in range(contact_efc_address_in.shape[1]):
+    ea = contact_efc_address_in[cid, j]
+    if ea >= 0 and efc_state_in[w, ea] != ConstraintState.SATISFIED:
+      return True
+  return False
+
+
 # Topology gather: per-contact spatial motions V/A/Z from a symmetric-difference dof walk.
 @wp.kernel(enable_backward=False)
 def _contact_gather(
@@ -331,7 +345,7 @@ def _contact_gather(
   e0 = contact_efc_address_in[cid, 0]
   if e0 < 0:
     return
-  if efc_state_in[w, e0] == ConstraintState.SATISFIED:
+  if not _contact_any_active(efc_state_in, contact_efc_address_in, cid, w):
     return
   geom = contact_geom_in[cid]
   if geom[0] < 0 or geom[1] < 0:  # flex (negative geom ids): unsupported
@@ -416,8 +430,9 @@ def _contact_phi(cone_type: int):
     if e0 < 0:
       return
     st = efc_state_in[w, e0]
-    if st == ConstraintState.SATISFIED:
-      return
+    if wp.static(IS_ELLIPTIC):  # the pyramidal branch below tests the state of each edge
+      if st == ConstraintState.SATISFIED:
+        return
     dt = opt_timestep[w % opt_timestep.shape[0]]
     imp_isq = opt_impratio_invsqrt[w % opt_impratio_invsqrt.shape[0]]
     condim = contact_dim_in[cid]
@@ -536,7 +551,7 @@ def _contact_scatter(geom_friction_grad: bool):
     e0 = contact_efc_address_in[cid, 0]
     if e0 < 0:
       return
-    if efc_state_in[w, e0] == ConstraintState.SATISFIED:
+    if not _contact_any_active(efc_state_in, contact_efc_address_in, cid, w):
       return
     geom = contact_geom_in[cid]
     if geom[0] < 0 or geom[1] < 0:
